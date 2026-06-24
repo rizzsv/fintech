@@ -1,0 +1,406 @@
+// PRISMA SCHEMA — Digital Wallet (OVO/DANA-inspired)
+// Merged from: SQL production schema + Prisma V1
+// Key design decisions:
+//   - Transactions reference wallets (not users) for financial integrity
+//   - Double-entry ledger is the source of truth for balances
+//   - Wallet.balance is a cached value, always reconcilable via ledger
+//   - Optimistic locking via wallet.version prevents race conditions
+//   - Idempotency lives on Transaction, not a separate table
+//   - Sessions handle refresh token rotation securely
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ENUMS
+
+enum KycStatus {
+  PENDING
+  VERIFIED
+  REJECTED
+
+  @@map("kyc_status")
+}
+
+enum KycTier {
+  BASIC // lowest limits
+  VERIFIED // mid limits
+  PREMIUM // highest limits
+
+  @@map("kyc_tier")
+}
+
+enum TransactionType {
+  TRANSFER
+  TOPUP
+  WITHDRAWAL
+  REFUND
+
+  @@map("transaction_type")
+}
+
+enum TransactionStatus {
+  PENDING
+  COMPLETED
+  FAILED
+  CANCELLED
+
+  @@map("transaction_status")
+}
+
+enum EntryType {
+  DEBIT
+  CREDIT
+
+  @@map("entry_type")
+}
+
+enum FraudCaseStatus {
+  OPEN
+  REVIEWED
+  RESOLVED
+  DISMISSED
+
+  @@map("fraud_case_status")
+}
+
+// USER
+
+model User {
+  id           String  @id @default(uuid())
+  email        String  @unique
+  phoneNumber  String  @unique @map("phone_number")
+  passwordHash String  @map("password_hash")
+  firstName    String? @map("first_name")
+  lastName     String? @map("last_name")
+
+  // KYC state — drives transaction limits via UserLimit
+  kycStatus KycStatus @default(PENDING) @map("kyc_status")
+  kycTier   KycTier   @default(BASIC) @map("kyc_tier")
+
+  // Store private storage PATHS only; generate signed URLs at app layer
+  kycDocumentPath String? @map("kyc_document_path")
+  kycSelfiePath   String? @map("kyc_selfie_path")
+
+  isActive  Boolean   @default(true) @map("is_active")
+  deletedAt DateTime? @map("deleted_at") // soft delete — never hard-delete financial actors
+
+  isEmailVerified Boolean @default(false)
+
+  emailVerificationToken String?
+
+  emailVerificationExpiresAt DateTime?
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  // Relations
+  wallet        Wallet[]
+  sessions      Session[]
+  kycRequests   KycRequest[]
+  userLimit     UserLimit?
+  notifications Notification[]
+  fraudCases    FraudCase[]
+  auditLogs     AuditLog[]
+
+  @@index([kycStatus], map: "idx_users_kyc_status")
+  @@map("users")
+}
+
+// WALLET
+
+model Wallet {
+  id       String @id @default(uuid())
+  userId   String @map("user_id")
+  currency String @default("IDR")
+
+  // Cached balance — source of truth is ledger_entries.
+  // Must always equal: SELECT SUM(amount) FROM ledger_entries WHERE wallet_id = this.id
+  balance Decimal @default(0) @db.Decimal(18, 2)
+
+  // Optimistic locking guard.
+  // Every mutation: UPDATE wallets SET balance=?, version=version+1 WHERE id=? AND version=?
+  // If 0 rows affected → someone else updated first → retry the transaction.
+  version Int @default(0)
+
+  isFrozen Boolean @default(false) @map("is_frozen")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  // Relations
+  user                 User          @relation(fields: [userId], references: [id], onDelete: Restrict)
+  outgoingTransactions Transaction[] @relation("FromWallet")
+  incomingTransactions Transaction[] @relation("ToWallet")
+  ledgerEntries        LedgerEntry[]
+
+  // One wallet per currency per user
+  @@unique([userId, currency])
+  @@index([userId], map: "idx_wallets_user_id")
+  @@map("wallets")
+}
+
+// TRANSACTION
+// The "intent" / envelope of a money movement.
+// Wallet references (not user) for financial correctness.
+
+model Transaction {
+  id String @id @default(uuid())
+
+  // null for topup  (money enters from outside)
+  // null for withdrawal (money leaves to outside)
+  fromWalletId String? @map("from_wallet_id")
+  toWalletId   String? @map("to_wallet_id")
+
+  amount Decimal @db.Decimal(18, 2)
+  fee    Decimal @default(0) @db.Decimal(18, 2)
+
+  transactionType TransactionType   @map("transaction_type")
+  status          TransactionStatus @default(PENDING)
+
+  description     String? @db.VarChar(500)
+  referenceNumber String  @unique @map("reference_number") // internal ref, shown to user
+  idempotencyKey  String  @unique @map("idempotency_key") // prevents duplicate processing on retry
+
+  // For topup/withdrawal — which external rail handled it
+  paymentChannel    String? @map("payment_channel") // e.g. 'va_bca', 'gopay'
+  externalReference String? @map("external_reference") // gateway's own tx id
+
+  // Flexible bag for gateway-specific data (VA number, bank code, etc.)
+  // Avoids schema migration every time a new channel is onboarded
+  metadata Json?
+
+  createdAt   DateTime  @default(now()) @map("created_at")
+  completedAt DateTime? @map("completed_at")
+
+  // Relations
+  fromWallet    Wallet?          @relation("FromWallet", fields: [fromWalletId], references: [id], onDelete: Restrict)
+  toWallet      Wallet?          @relation("ToWallet", fields: [toWalletId], references: [id], onDelete: Restrict)
+  ledgerEntries LedgerEntry[]
+  logs          TransactionLog[]
+
+  @@index([fromWalletId, createdAt], map: "idx_tx_from_wallet")
+  @@index([toWalletId, createdAt], map: "idx_tx_to_wallet")
+  @@index([status, createdAt], map: "idx_tx_status")
+  @@index([idempotencyKey], map: "idx_tx_idempotency")
+  @@map("transactions")
+}
+
+// LEDGER ENTRIES — Immutable, append-only double-entry book.
+// Every transaction produces 2+ balanced rows (debit + credit).
+// NEVER UPDATE or DELETE a row; corrections = new offsetting entries.
+
+model LedgerEntry {
+  id            String @id @default(uuid())
+  transactionId String @map("transaction_id")
+  walletId      String @map("wallet_id")
+
+  entryType    EntryType @map("entry_type")
+  amount       Decimal   @db.Decimal(18, 2)
+  balanceAfter Decimal   @map("balance_after") @db.Decimal(18, 2) // snapshot, makes statement queries cheap
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  // Relations
+  transaction Transaction @relation(fields: [transactionId], references: [id], onDelete: Restrict)
+  wallet      Wallet      @relation(fields: [walletId], references: [id], onDelete: Restrict)
+
+  @@index([walletId, createdAt], map: "idx_ledger_wallet")
+  @@index([transactionId], map: "idx_ledger_transaction")
+  @@index([walletId, transactionId], map: "idx_ledger_wallet_transaction")
+  @@map("ledger_entries")
+}
+
+// TRANSACTION LOGS — Status audit trail (append-only)
+
+model TransactionLog {
+  id            String @id @default(uuid())
+  transactionId String @map("transaction_id")
+
+  event        String
+  statusBefore TransactionStatus? @map("status_before")
+  statusAfter  TransactionStatus? @map("status_after")
+
+  metadata Json?
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  transaction Transaction @relation(fields: [transactionId], references: [id], onDelete: Restrict)
+
+  @@index([transactionId, createdAt], map: "idx_tx_logs_transaction")
+  @@map("transaction_logs")
+}
+
+// USER LIMITS — KYC-tier based transaction limits
+
+model UserLimit {
+  userId String @id @map("user_id")
+
+  dailyLimit   Decimal @map("daily_limit") @db.Decimal(18, 2)
+  monthlyLimit Decimal @map("monthly_limit") @db.Decimal(18, 2)
+  dailyUsed    Decimal @default(0) @map("daily_used") @db.Decimal(18, 2)
+  monthlyUsed  Decimal @default(0) @map("monthly_used") @db.Decimal(18, 2)
+
+  lastResetAt DateTime @default(now()) @map("last_reset_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Restrict)
+
+  @@map("user_limits")
+}
+
+// SESSIONS — Refresh token management
+
+model Session {
+  id     String @id @default(uuid())
+  userId String @map("user_id")
+
+  refreshTokenHash String @map("refresh_token_hash") // never store raw tokens
+
+  deviceName String? @map("device_name")
+  deviceIp   String? @map("device_ip") // IPv6-safe, max 45 chars
+  userAgent  String? @map("user_agent")
+
+  isActive  Boolean  @default(true) @map("is_active")
+  expiresAt DateTime @map("expires_at")
+
+  createdAt    DateTime  @default(now()) @map("created_at")
+  lastActivity DateTime? @map("last_activity")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Restrict)
+
+  @@index([userId, isActive], map: "idx_sessions_user")
+  @@index([refreshTokenHash], map: "idx_sessions_refresh_token")
+  @@map("sessions")
+}
+
+// KYC REQUEST
+
+model KycRequest {
+  id     String @id @default(uuid())
+  userId String @map("user_id")
+
+  // Store paths to private storage — generate signed URLs at app layer
+  documentPath String? @map("document_path")
+  selfiePath   String? @map("selfie_path")
+
+  status     KycStatus @default(PENDING)
+  reviewNote String?   @map("review_note") // rejection reason, etc.
+  reviewedAt DateTime? @map("reviewed_at")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Restrict)
+
+  @@index([userId, status], map: "idx_kyc_user_status")
+  @@map("kyc_requests")
+}
+
+// FRAUD CASE
+
+model FraudCase {
+  id     String @id @default(uuid())
+  userId String @map("user_id")
+
+  riskScore Int
+  reason    String
+  status    FraudCaseStatus @default(OPEN)
+
+  metadata Json?
+
+  createdAt  DateTime  @default(now()) @map("created_at")
+  resolvedAt DateTime? @map("resolved_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Restrict)
+
+  @@index([userId, status], map: "idx_fraud_user_status")
+  @@map("fraud_cases")
+}
+
+// NOTIFICATION
+
+model Notification {
+  id     String @id @default(uuid())
+  userId String @map("user_id")
+
+  type String
+
+  title   String
+  message String
+  isRead  Boolean @default(false) @map("is_read")
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Restrict)
+
+  @@index([userId, isRead], map: "idx_notifications_user_read")
+  @@map("notifications")
+}
+
+// AUDIT LOG — System-wide action trail
+
+model AuditLog {
+  id     String  @id @default(uuid())
+  userId String? @map("user_id") // nullable — system actions have no user
+
+  action   String
+  resource String
+  metadata Json?
+
+  ipAddress String? @map("ip_address")
+  userAgent String? @map("user_agent")
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  user User? @relation(fields: [userId], references: [id], onDelete: Restrict)
+
+  @@index([userId, createdAt], map: "idx_audit_user")
+  @@index([resource, createdAt], map: "idx_audit_resource")
+  @@map("audit_logs")
+}
+
+// REFERENCE: typical P2P transfer flow (application layer)
+// Run inside a single DB transaction ($tx). Always lock wallets
+// in consistent order (wallet id ASC) to avoid deadlocks.
+//
+//  const [walletA, walletB] = await Promise.all([
+//    tx.wallet.findUniqueOrThrow({ where: { id: fromId } }),
+//    tx.wallet.findUniqueOrThrow({ where: { id: toId   } }),
+//  ]);
+//
+//  // 1. Guard checks
+//  if (walletA.isFrozen || walletB.isFrozen) throw new Error('WALLET_FROZEN');
+//  if (walletA.balance < amount + fee)        throw new Error('INSUFFICIENT_BALANCE');
+//
+//  // 2. Create transaction (pending)
+//  const tx_record = await tx.transaction.create({ data: { ..., status: 'PENDING' } });
+//
+//  // 3. Update balances with optimistic lock
+//  const updatedFrom = await tx.wallet.updateMany({
+//    where: { id: fromId, version: walletA.version },
+//    data:  { balance: walletA.balance - amount - fee, version: { increment: 1 } },
+//  });
+//  if (updatedFrom.count === 0) throw new Error('OPTIMISTIC_LOCK_FAILED'); // retry
+//
+//  await tx.wallet.updateMany({
+//    where: { id: toId, version: walletB.version },
+//    data:  { balance: walletB.balance + amount, version: { increment: 1 } },
+//  });
+//
+//  // 4. Write ledger entries (immutable)
+//  await tx.ledgerEntry.createMany({ data: [
+//    { transactionId: tx_record.id, walletId: fromId, entryType: 'DEBIT',  amount: amount+fee, balanceAfter: newFromBalance },
+//    { transactionId: tx_record.id, walletId: toId,   entryType: 'CREDIT', amount: amount,     balanceAfter: newToBalance   },
+//  ]});
+//
+//  // 5. Mark completed + audit
+//  await tx.transaction.update({ where: { id: tx_record.id }, data: { status: 'COMPLETED', completedAt: new Date() } });
+//  await tx.transactionLog.create({ data: { transactionId: tx_record.id, event: 'transfer_completed', statusBefore: 'PENDING', statusAfter: 'COMPLETED' } });
+//
+//  // COMMIT (implicit at end of $transaction callback)
