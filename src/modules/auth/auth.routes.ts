@@ -1,9 +1,10 @@
-import {Router} from 'express';
-import {authController} from '../controllers/auth.controller';
-import {validateRequest} from '../../../shared/middleware/requestValidator.middleware';
-import {registerSchema, loginSchema, refreshTokenSchema, logoutSchema, resendVerificationSchema} from '../validators/auth.validator'
-import { authMiddleware } from "../../../shared/middleware/auth.middleware";
-import { loginRateLimiter, refreshRateLimiter } from '../../../shared/middleware/rateLimiter.middleware';
+import { Router } from "express";
+import { loginRateLimiter, refreshRateLimiter } from "../../shared/middleware/rateLimiter.middleware";
+import { validateRequest } from "../../shared/middleware/requestValidator.middleware";
+import { authController } from "./controllers/auth.controller";
+import { loginSchema, logoutSchema, refreshTokenSchema, registerSchema, resendVerificationSchema } from "./validators/auth.validator";
+import { authMiddleware } from "../../shared/middleware/auth.middleware";
+
 
 const router = Router();
 
