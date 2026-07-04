@@ -1,5 +1,6 @@
 import { redis } from "../config/redis";
-import { logger } from "./logger.service";
+import { logger } from "../logger/logger";
+
 
 export const cacheService = {
   async get(key: string) {

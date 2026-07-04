@@ -1,6 +1,6 @@
-import {Request, Response, NextFunction} from 'express';
-import {verifyAccessToken} from "../utils/token.utils";
-import {AuthError} from "../errors/AuthError";
+import { Request, Response, NextFunction } from 'express';
+import { verifyAccessToken } from "../utils/token.utils";
+import { AuthError } from "../errors/AuthError";
 import { authRepository } from '../../modules/auth/repositories/auth.repository';
 
 export async function authMiddleware(
@@ -18,11 +18,11 @@ export async function authMiddleware(
         const token = authHeader.replace("Bearer ", "");
 
         console.log("AUTH HEADER", authHeader);
-console.log("TOKEN", token);
+        console.log("TOKEN", token);
         const payload = verifyAccessToken(token);
 
         console.log("PAYLOAD", payload);
-                const session = await authRepository.findSessionById(
+        const session = await authRepository.findSessionById(
             payload.sessionId
         )
 
@@ -41,7 +41,7 @@ console.log("TOKEN", token);
     } catch (error) {
         next(
             new AuthError(
-"Unauthorized", "UNAUTHORIZED", 401
+                "Unauthorized", "UNAUTHORIZED", 401
             )
         )
     }

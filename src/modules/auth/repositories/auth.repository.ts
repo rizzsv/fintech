@@ -1,4 +1,4 @@
-import {Prisma, User} from '@prisma/client';
+import {Prisma, TransactionStatus, User} from '@prisma/client';
 import {prisma} from '../../../shared/config/database'
 
 export class AuthRepository {
@@ -162,20 +162,37 @@ export class AuthRepository {
         })
     }
 
-async updateVerificationToken(
+async updateVerificationTokenRegister(
+  tx: Prisma.TransactionClient,
   userId: string,
   tokenHash: string,
   expiresAt: Date
 ) {
-  return prisma.user.update({
+return tx.user.update({
     where: {
-      id: userId,
+        id: userId,
     },
     data: {
-      emailVerificationToken: tokenHash,
-      emailVerificationExpiresAt: expiresAt,
+        emailVerificationToken: tokenHash,
+        emailVerificationExpiresAt: expiresAt,
     },
-  });
+});
+}
+
+async updateVerificationToken(
+    userId: string,
+    tokenHash: string,
+    expiresAt: Date
+) {
+    return prisma.user.update({
+        where: {
+            id: userId,
+        },
+        data: {
+            emailVerificationToken: tokenHash,
+            emailVerificationExpiresAt: expiresAt,
+        },
+    });
 }
 }
 

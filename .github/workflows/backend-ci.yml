@@ -1,4 +1,4 @@
-name: Backend CI
+name: Fintech Backend CI
 
 on:
   push:
@@ -12,25 +12,62 @@ on:
       - Development
 
 jobs:
-  build:
-
+  test:
     runs-on: ubuntu-latest
 
-    strategy:
-      matrix:
-        node-version: [22.x]
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: fintech_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/fintech_test
+      REDIS_HOST: localhost
+      REDIS_PORT: 6379
+      JWT_SECRET: testing-secret
+      REFRESH_TOKEN_SECRET: testing-refresh-secret
+      APP_URL: http://localhost:3000
+      NODE_ENV: test
 
     steps:
-      - name: Checkout
+      - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Setup Node
+      - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: ${{ matrix.node-version }}
+          node-version: 22
+          cache: npm
 
       - name: Install Dependencies
         run: npm ci
 
+      - name: Generate Prisma Client
+        run: npx prisma generate
+
+      - name: Run Database Migration
+        run: npx prisma migrate deploy
+
       - name: Build Project
         run: npm run build
+
+      - name: Run Unit Test
+        run: npm run test
+
+      - name: Run Integration Test
+        run: npm run test

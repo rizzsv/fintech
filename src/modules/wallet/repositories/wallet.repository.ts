@@ -1,15 +1,44 @@
+import { Prisma } from '@prisma/client';
 import {prisma} from '../../../shared/config/database'
 
 export class WalletRepository {
     async findByUserId(userId: string) {
-        return prisma.wallet.findUnique({
+        return prisma.wallet.findFirst({
             where: {
-                userId_currency: {
-                    userId,
-                    currency: 'IDR'
-                }
+                userId
+            },
+            include: {
+                user: true
             }
         });
+    }
+
+    async updateBalance(
+        tx: Prisma.TransactionClient,
+        walletId: string,
+        version: number,
+        newBalance: Prisma.Decimal
+    ) {
+        return tx.wallet.updateMany({
+            where: {
+                id: walletId,
+                version
+            },
+            data: {
+                balance: newBalance,
+                version: {
+                    increment: 1
+                }
+            },
+        });
+    }
+
+    async findUserLimit(userId: string) {
+        return prisma.userLimit.findUnique({
+            where: {
+                userId
+            }
+        })
     }
 
     async getUserLimits(userId: string) {
@@ -20,7 +49,7 @@ export class WalletRepository {
         });
     }
 
-    async getWallerWithUser(userId: string) {
+    async getWalletWithUser(userId: string) {
         return prisma.wallet.findUnique({
             where: {
                 userId_currency: {
@@ -75,6 +104,17 @@ export class WalletRepository {
             total,
         }
     }
+
+    async findWalletById(walletId: string) {
+    return prisma.wallet.findUnique({
+        where: {
+            id: walletId,
+        },
+        include: {
+            user: true,
+        },
+    });
+}
 }
 
 export const walletRepository = new WalletRepository();

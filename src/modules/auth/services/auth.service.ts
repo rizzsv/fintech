@@ -8,7 +8,7 @@ import { generateAccessToken, generateRefreshToken } from '../../../shared/utils
 import { hashToken } from '../../../shared/helper/refreshtoken.helper'
 import { NotFoundError } from '../../../shared/errors/NotFoundError'
 import { generateVerificationToken } from '../../../shared/helper/emailVerification.helper'
-import { emailService } from '../../../shared/services/email.service'
+import { notificationService } from '../../notification/service/notification.service'
 
 export class AuthService {
     async register(dto: RegisterDTO) {
@@ -65,7 +65,8 @@ export class AuthService {
             const verificationHash =
                 hashToken(verificationToken);
 
-            await authRepository.updateVerificationToken(
+            await authRepository.updateVerificationTokenRegister(
+                tx,
                 user.id,
                 verificationHash,
                 new Date(
@@ -73,10 +74,12 @@ export class AuthService {
                 )
             );
 
-            await emailService.sendVerificationEmail(
-                user.email,
-                verificationToken
-            );
+            const verificationUrl = `${process.env.APP_URL}/api/auth/verify-email?token=${verificationToken}`;
+
+            // await notificationService.sendVerificationEmail(
+            //     user.email,
+            //     verificationUrl
+            // );
 
             return {
                 id: user.id,
@@ -105,22 +108,28 @@ export class AuthService {
             );
         }
 
-        const token =
+        const verificationToken =
             generateVerificationToken();
+
+        const verificationHash =
+            hashToken(verificationToken);
 
         const expiresAt =
             new Date(Date.now() + 60 * 60 * 1000);
 
         await authRepository.updateVerificationToken(
             user.id,
-            token,
+            verificationHash,
             expiresAt
         );
 
-        await emailService.sendVerificationEmail(
-            user.email,
-            token
-        );
+        const verificationUrl =
+            `${process.env.APP_URL}/api/auth/verify-email?token=${verificationToken}`;
+
+        // await notificationService.sendVerificationEmail(
+        //     user.email,
+        //     verificationUrl
+        // );
 
         return {
             message:

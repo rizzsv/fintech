@@ -45,10 +45,13 @@ enum TransactionType {
 }
 
 enum TransactionStatus {
+  CREATED
   PENDING
-  COMPLETED
+  PROCESSING
+  SUCCESS
   FAILED
   CANCELLED
+  REVERSED
 
   @@map("transaction_status")
 }
@@ -116,7 +119,7 @@ model User {
 
 model Wallet {
   id       String @id @default(uuid())
-  userId   String @map("user_id")
+  userId   String @unique 
   currency String @default("IDR")
 
   // Cached balance — source of truth is ledger_entries.

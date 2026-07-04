@@ -1,0 +1,1 @@
+![CI](https://github.com/rizzsv/https://github.com/rizzsv/fintech/actions/workflows/backend.yml/badge.svg)

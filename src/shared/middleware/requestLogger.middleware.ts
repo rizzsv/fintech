@@ -1,5 +1,6 @@
 import { Request, Response, NextFunction } from "express";
-import { logger } from "../services/logger.service";
+import { logger } from "../logger/logger";
+
 
 export function requestLogger(
   req: Request,

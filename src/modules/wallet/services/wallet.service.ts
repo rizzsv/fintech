@@ -1,41 +1,122 @@
-import { NotFoundError } from '../../../shared/errors/NotFoundError';
-import { walletRepository } from '../repositories/wallet.repository';
+import { NotFoundError } from "../../../shared/errors/NotFoundError";
+import { walletRepository } from "../repositories/wallet.repository";
+import { walletCache } from "../../../shared/cache/wallet.cache";
+import { BusinessLogger } from "../../../shared/logger/business-logger";
+import { cacheCounter } from "../../../shared/metrics/metrics";
 
 export class WalletService {
+
     async getBalance(userId: string) {
+
         const wallet =
             await walletRepository.findByUserId(userId);
 
         if (!wallet) {
-            throw new NotFoundError('Wallet not found');
+
+            BusinessLogger.warn(
+                "Wallet not found",
+                {
+                    userId,
+                }
+            );
+
+            throw new NotFoundError("Wallet not found");
         }
+
+        const cached =
+            await walletCache.getBalance(wallet.id);
+
+        if (cached !== null) {
+
+            cacheCounter.inc({
+                result: "hit",
+            });
+
+            BusinessLogger.info(
+                "Wallet balance cache hit",
+                {
+                    walletId: wallet.id,
+                    userId,
+                }
+            );
+
+            return {
+                walletId: wallet.id,
+                currency: wallet.currency,
+                balance: Number(cached),
+                source: "redis",
+            };
+        }
+
+        cacheCounter.inc({
+            result: "miss",
+        });
+
+        BusinessLogger.info(
+            "Wallet balance cache miss",
+            {
+                walletId: wallet.id,
+                userId,
+            }
+        );
+
+        await walletCache.setBalance(
+            wallet.id,
+            wallet.balance.toString()
+        );
 
         return {
             walletId: wallet.id,
-            balance: wallet.balance,
             currency: wallet.currency,
-            isFrozen: wallet.isFrozen
+            balance: wallet.balance,
+            source: "database",
         };
     }
 
     async getLimits(userId: string) {
+
         const limit =
-            await walletRepository.getUserLimits(userId);
+            await walletRepository.findUserLimit(userId);
 
         if (!limit) {
-            throw new NotFoundError('User limit not found');
+
+            BusinessLogger.warn(
+                "User limit not found",
+                {
+                    userId,
+                }
+            );
+
+            throw new NotFoundError(
+                "User limit not found"
+            );
         }
 
         return limit;
     }
 
     async getWallet(userId: string) {
+
         const wallet =
-            await walletRepository.getWallerWithUser(userId);
+            await walletRepository.getWalletWithUser(
+                userId
+            );
 
         if (!wallet) {
-            throw new NotFoundError('Wallet not found');
+
+            BusinessLogger.warn(
+                "Wallet not found",
+                {
+                    userId,
+                }
+            );
+
+            throw new NotFoundError(
+                "Wallet not found"
+            );
         }
+
+        return wallet;
     }
 
     async getLedger(
@@ -43,16 +124,41 @@ export class WalletService {
         page: number = 1,
         limit: number = 20
     ) {
-        const wallet = await walletRepository.findByUserId(userId);
+
+        const wallet =
+            await walletRepository.findByUserId(
+                userId
+            );
 
         if (!wallet) {
-            throw new NotFoundError('Wallet not found');
+
+            BusinessLogger.warn(
+                "Wallet not found",
+                {
+                    userId,
+                }
+            );
+
+            throw new NotFoundError(
+                "Wallet not found"
+            );
         }
 
-        const ledger = await walletRepository.getLedger(
-            wallet.id,
-            page,
-            limit
+        const ledger =
+            await walletRepository.getLedger(
+                wallet.id,
+                page,
+                limit
+            );
+
+        BusinessLogger.info(
+            "Ledger retrieved",
+            {
+                walletId: wallet.id,
+                page,
+                limit,
+                total: ledger.total,
+            }
         );
 
         return {
@@ -62,8 +168,10 @@ export class WalletService {
                 page,
                 limit,
                 total: ledger.total,
-                totalPages: Math.ceil(ledger.total / limit)
-            }
-        }
+                totalPages: Math.ceil(
+                    ledger.total / limit
+                ),
+            },
+        };
     }
 }

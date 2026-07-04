@@ -89,6 +89,29 @@ export class WalletController {
             next(error);
         }
     }
+
+    async balance(
+    req: Request,
+    res: Response,
+    next: NextFunction
+) {
+    try {
+
+        const result =
+            await new WalletService().getBalance(
+                req.user!.id
+            );
+
+        return ResponseUtils.success(
+            res,
+            result,
+            "Balance fetched successfully"
+        );
+
+    } catch (err) {
+        next(err);
+    }
+}
 }
 
 export const walletController = 
