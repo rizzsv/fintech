@@ -36,13 +36,26 @@ jobs:
           - 6379:6379
 
     env:
-      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/fintech_test
-      REDIS_HOST: localhost
-      REDIS_PORT: 6379
-      JWT_SECRET: testing-secret
-      REFRESH_TOKEN_SECRET: testing-refresh-secret
-      APP_URL: http://localhost:3000
-      NODE_ENV: test
+      NODE_ENV: "test"
+      APP_PORT: "3000"
+
+      DB_HOST: "localhost"
+      DB_PORT: "5432"
+      DB_NAME: "fintech_test"
+      DB_USER: "postgres"
+      DB_PASSWORD: "postgres"
+
+      DATABASE_URL: "postgresql://postgres:postgres@localhost:5432/fintech_test"
+
+      REDIS_HOST: "localhost"
+      REDIS_PORT: "6379"
+
+      JWT_SECRET: "testing-secret"
+      REFRESH_TOKEN_SECRET: "testing-refresh-secret"
+
+      APP_URL: "http://localhost:3000"
+
+      LOG_LEVEL: "silent"
 
     steps:
       - name: Checkout Repository
@@ -66,8 +79,5 @@ jobs:
       - name: Build Project
         run: npm run build
 
-      - name: Run Unit Test
-        run: npm run test
-
-      - name: Run Integration Test
-        run: npm run test
+      - name: Run Tests
+        run: npm test
